@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         YouTube 统计信息增强版
 // @namespace    https://tampermonkey.net/
-// @version      2.10.0
-// @description  增强 YouTube Stats for nerds：优化拖动性能、后台暂停兜底刷新，并保留简约三行统计、动态颜色和油猴常开切换
+// @version      0.0.26
+// @description  增强 YouTube Stats for nerds：统计浮窗仅在播放页显示；常开模式使用稳定自带浮窗，避免右键菜单闪烁
 // @author       longqiuyu
-// @match        https://www.youtube.com/watch*
+// @match        https://www.youtube.com/*
 // @run-at       document-idle
 // @grant        GM_registerMenuCommand
 // @grant        GM_getValue
@@ -66,8 +66,8 @@
         dragStorageKey: 'yt-stats-enhancer-floating-position',
         floatingMargin: 8,
 
-        autoOpenDelayMs: 800,
-        autoOpenAttemptLimit: 3,
+        autoOpenDelayMs: 1200,
+        autoOpenAttemptLimit: 4,
         statsMenuLabels: ['Stats for nerds', '详细统计信息', '详细统计资料']
     };
 
@@ -159,11 +159,32 @@
         host.classList.add('ytse-floating-host');
     }
 
+    let floatingResizeHandlerReady = false;
+
+    function clampFloatingHostsToViewport() {
+        const hosts = Array.from(document.querySelectorAll('.ytse-floating-host, [data-yt-stats-floating-panel="1"]'));
+        hosts.forEach((host) => {
+            if (!(host instanceof HTMLElement) || !host.isConnected) return;
+
+            const rect = host.getBoundingClientRect();
+            const next = applyFloatingPosition(host, rect.left, rect.top);
+            saveFloatingPosition(next.left, next.top);
+        });
+    }
+
+    function ensureFloatingResizeHandler() {
+        if (floatingResizeHandlerReady) return;
+
+        floatingResizeHandlerReady = true;
+        window.addEventListener('resize', clampFloatingHostsToViewport);
+    }
+
     function setupFloatingDrag(panel) {
         const host = getFloatingHost(panel);
         if (!host) return;
 
         promotePanelToFloatingLayer(host);
+        ensureFloatingResizeHandler();
 
         if (!host.dataset.ytStatsFloatingPositioned) {
             const initialPosition = getInitialFloatingPosition(host);
@@ -242,11 +263,6 @@
             event.stopPropagation();
         }, true);
 
-        window.addEventListener('resize', () => {
-            const rect = host.getBoundingClientRect();
-            const next = applyFloatingPosition(host, rect.left, rect.top);
-            saveFloatingPosition(next.left, next.top);
-        });
     }
 
 
@@ -356,8 +372,11 @@
                 background: transparent !important;
                 font-size: 11px !important;
                 line-height: 1.4 !important;
+                max-height: min(68vh, 680px) !important;
+                overflow: auto !important;
             }
-            .ytse-panel > * {
+            .ytse-panel > *,
+            .ytse-panel [data-ytse-custom-details] > * {
                 display: grid !important;
                 grid-template-columns: 120px minmax(0, 1fr) !important;
                 align-items: center !important;
@@ -368,9 +387,28 @@
                 border-radius: 5px !important;
                 border-bottom: 0 !important;
             }
-            .ytse-panel > *:nth-child(odd) { background: rgba(255, 255, 255, 0.032) !important; }
-            .ytse-panel > *:hover { background: rgba(255, 255, 255, 0.065) !important; }
+            .ytse-panel > *:nth-child(odd),
+            .ytse-panel [data-ytse-custom-details] > *:nth-child(odd) { background: rgba(255, 255, 255, 0.032) !important; }
+            .ytse-panel > *:hover,
+            .ytse-panel [data-ytse-custom-details] > *:hover { background: rgba(255, 255, 255, 0.065) !important; }
             .ytse-label { color: #aaa !important; font-weight: 500 !important; white-space: nowrap !important; width: 120px !important; min-width: 120px !important; }
+            .ytse-panel [data-ytse-custom-details] {
+                display: block !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                background: transparent !important;
+            }
+            .ytse-section {
+                display: block !important;
+                color: #f1f1f1 !important;
+                font-size: 10px !important;
+                font-weight: 700 !important;
+                letter-spacing: 0 !important;
+                text-transform: uppercase !important;
+                padding: 7px 5px 3px !important;
+                background: transparent !important;
+                opacity: 0.86 !important;
+            }
             .ytse-value {
                 justify-self: end !important;
                 max-width: 100% !important;
@@ -392,6 +430,7 @@
             }
             .ytse-muted-value { color: #aaa !important; font-weight: 500 !important; }
             .ytse-floating-host[data-ytse-expanded="0"] .ytse-panel { display: none !important; }
+            .ytse-floating-host[data-ytse-expanded="1"] .ytse-panel { display: block !important; }
             .ytse-floating-host[data-ytse-expanded="1"] .ytse-summary { border-bottom: 1px solid rgba(255, 255, 255, 0.07) !important; }
         `;
         document.head.appendChild(style);
@@ -533,9 +572,29 @@
         return row;
     }
 
+    function createCustomSection(titleText) {
+        const section = document.createElement('div');
+        section.className = 'ytse-section';
+        section.textContent = titleText;
+        return section;
+    }
+
     function normalizeText(text) {
         return (text || '').replace(/\s+/g, ' ').trim();
     }
+
+    function isWatchPage() {
+        return location.hostname === 'www.youtube.com' && location.pathname === '/watch';
+    }
+
+    function getWatchPageKey() {
+        if (!isWatchPage()) return '';
+        const videoId = new URLSearchParams(location.search).get('v') || '';
+        return `${location.pathname}?v=${videoId}`;
+    }
+
+    let activeWatchPageKey = '';
+    let routeRefreshSeq = 0;
 
     function isStatsPanelOpen() {
         const panel = document.querySelector(PANEL_SELECTOR);
@@ -543,11 +602,11 @@
     }
 
     function findVideoTarget() {
-        return document.querySelector('#movie_player video')
+        return document.querySelector('#movie_player')
+            || document.querySelector('.html5-video-player')
+            || document.querySelector('#movie_player video')
             || document.querySelector('.html5-video-player video')
-            || document.querySelector('video')
-            || document.querySelector('#movie_player')
-            || document.querySelector('.html5-video-player');
+            || document.querySelector('video');
     }
 
     function findStatsMenuItem() {
@@ -603,11 +662,10 @@
 
         if (isAutoOpenEnabled()) {
             autoOpenAttempts = 0;
-            startCustomStatsPanel();
+            setNativeStatsPanelsVisible(true);
             scheduleAutoOpenStatsPanel();
         } else {
-            clearAutoOpenTimer();
-            removeCustomStatsPanel();
+            cleanupFloatingStatsPanels();
         }
     }
 
@@ -624,8 +682,11 @@
     function attemptAutoOpenStatsPanel() {
         autoOpenTimer = null;
 
-        if (!isAutoOpenEnabled() || isStatsPanelOpen()) return;
-        if (autoOpenAttempts >= CONFIG.autoOpenAttemptLimit) return;
+        if (!isWatchPage() || !isAutoOpenEnabled() || isStatsPanelOpen()) return;
+        if (autoOpenAttempts >= CONFIG.autoOpenAttemptLimit) {
+            startCustomStatsPanel();
+            return;
+        }
 
         const target = findVideoTarget();
         if (!target || !target.isConnected) {
@@ -647,15 +708,19 @@
                 return;
             }
 
+            document.dispatchEvent(new KeyboardEvent('keydown', {
+                bubbles: true,
+                cancelable: true,
+                key: 'Escape',
+                code: 'Escape'
+            }));
             scheduleAutoOpenStatsPanel();
         }, 120);
     }
 
     function scheduleAutoOpenStatsPanel() {
-        if (!isAutoOpenEnabled() || autoOpenTimer || isStatsPanelOpen()) return;
-        if (autoOpenAttempts >= CONFIG.autoOpenAttemptLimit) return;
-
-        autoOpenTimer = setTimeout(attemptAutoOpenStatsPanel, CONFIG.autoOpenDelayMs);
+        if (!isWatchPage() || !isAutoOpenEnabled()) return;
+        startCustomStatsPanel();
     }
 
     let customPanelTimer = null;
@@ -679,7 +744,229 @@
             const kbps = connection.downlink * 1000;
             return formatSpeedSummary(kbps);
         }
-        return '等待原生统计';
+        return '等待 YouTube 数据';
+    }
+
+    function getYouTubePlayer() {
+        const player = document.querySelector('#movie_player') || document.querySelector('.html5-video-player');
+        return player instanceof HTMLElement ? player : null;
+    }
+
+    function getYouTubeStatsForNerds() {
+        const player = getYouTubePlayer();
+        if (!player || typeof player.getStatsForNerds !== 'function') return null;
+
+        try {
+            const stats = player.getStatsForNerds();
+            return stats && typeof stats === 'object' ? stats : null;
+        } catch (error) {
+            return null;
+        }
+    }
+
+    function flattenStatsObject(value, prefix = '', output = []) {
+        if (!value || typeof value !== 'object') return output;
+
+        Object.entries(value).forEach(([key, entryValue]) => {
+            const nextKey = prefix ? `${prefix}.${key}` : key;
+            if (entryValue && typeof entryValue === 'object' && !Array.isArray(entryValue)) {
+                flattenStatsObject(entryValue, nextKey, output);
+            } else {
+                output.push({ key: nextKey.toLowerCase(), value: entryValue });
+            }
+        });
+
+        return output;
+    }
+
+    function getStatNumberFromValue(value) {
+        if (typeof value === 'number' && Number.isFinite(value)) return value;
+        const normalized = normalizeText(String(value ?? '')).replace(/,/g, '');
+        const match = normalized.match(/-?\d+(?:\.\d+)?/);
+        if (!match) return null;
+        const number = parseFloat(match[0]);
+        return Number.isFinite(number) ? number : null;
+    }
+
+    function getStatKbpsFromValue(value) {
+        const normalized = normalizeText(String(value ?? '')).replace(/,/g, '');
+        const mbps = normalized.match(/(-?\d+(?:\.\d+)?)\s*(?:mbps|mb\/s)/i);
+        if (mbps) return parseFloat(mbps[1]) * 1000;
+
+        const kbps = normalized.match(/(-?\d+(?:\.\d+)?)\s*(?:kbps|kb\/s)/i);
+        if (kbps) return parseFloat(kbps[1]);
+
+        return getStatNumberFromValue(value);
+    }
+
+    function getStatKbFromValue(value) {
+        const normalized = normalizeText(String(value ?? '')).replace(/,/g, '');
+        const mb = normalized.match(/(-?\d+(?:\.\d+)?)\s*mb/i);
+        if (mb) return parseFloat(mb[1]) * CONFIG.sizeBase;
+
+        const kb = normalized.match(/(-?\d+(?:\.\d+)?)\s*kb/i);
+        if (kb) return parseFloat(kb[1]);
+
+        const bytes = normalized.match(/(-?\d+(?:\.\d+)?)\s*(?:bytes|byte|b)\b/i);
+        if (bytes) return parseFloat(bytes[1]) / CONFIG.sizeBase;
+
+        return getStatNumberFromValue(value);
+    }
+
+    function findStatEntry(stats, keyPredicates) {
+        const entries = flattenStatsObject(stats);
+        return entries.find(({ key }) => keyPredicates.some((predicate) => predicate(key))) || null;
+    }
+
+    function getStatsForNerdsMetrics() {
+        const stats = getYouTubeStatsForNerds();
+        if (!stats) return {};
+
+        const speedEntry = findStatEntry(stats, [
+            (key) => key.includes('bandwidth') && key.includes('kbps'),
+            (key) => key.includes('bandwidth') && key.includes('estimate'),
+            (key) => key.includes('connection') && key.includes('speed'),
+            (key) => key.includes('connection_speed'),
+            (key) => key === 'bandwidth' || key.endsWith('.bandwidth')
+        ]);
+        const activityEntry = findStatEntry(stats, [
+            (key) => key.includes('network') && key.includes('activity'),
+            (key) => key.includes('bytes') && key.includes('network'),
+            (key) => key.includes('activity') && key.includes('bytes'),
+            (key) => key.includes('net') && key.includes('activity'),
+            (key) => key.includes('activity') && key.includes('kb')
+        ]);
+        const bufferEntry = findStatEntry(stats, [
+            (key) => key.includes('buffer') && key.includes('health'),
+            (key) => key.includes('buffer_health')
+        ]);
+
+        const speedKbps = speedEntry ? getStatKbpsFromValue(speedEntry.value) : null;
+        const activityKbRaw = activityEntry ? getStatKbFromValue(activityEntry.value) : null;
+        const activityKb = activityEntry?.key.includes('byte') && typeof activityEntry.value === 'number'
+            ? activityEntry.value / CONFIG.sizeBase
+            : activityKbRaw;
+        const bufferSeconds = bufferEntry ? getStatNumberFromValue(bufferEntry.value) : null;
+
+        return {
+            speedKbps: Number.isFinite(speedKbps) ? speedKbps : null,
+            activityKb: Number.isFinite(activityKb) ? activityKb : null,
+            bufferSeconds: Number.isFinite(bufferSeconds) ? bufferSeconds : null
+        };
+    }
+
+    function getNativePanelMetrics() {
+        const panel = document.querySelector(PANEL_SELECTOR);
+        if (!panel || !panel.isConnected) return {};
+
+        const metrics = {};
+        const rows = Array.from(panel.children).filter((node) => node instanceof HTMLElement);
+        rows.forEach((row) => {
+            const label = normalizeText(row.firstElementChild?.textContent || '');
+            const valueText = getSourceText(getRowValueLeafSpan(row));
+            if (label === 'Connection Speed') metrics.speedKbps = extractNumber(valueText, 'Kbps');
+            if (label === 'Network Activity') metrics.activityKb = extractNumber(valueText, 'KB');
+            if (label === 'Buffer Health') metrics.bufferSeconds = extractNumber(valueText, 's');
+        });
+
+        return metrics;
+    }
+
+    const networkActivityState = {
+        watchPageKey: '',
+        lastResourceBytes: null,
+        lastBufferSeconds: null,
+        lastCurrentTime: null
+    };
+
+    function getResourceTransferBytes(entry) {
+        if (!entry) return 0;
+        return [entry.transferSize, entry.encodedBodySize, entry.decodedBodySize]
+            .find((value) => Number.isFinite(value) && value > 0) || 0;
+    }
+
+    function isYouTubeMediaResource(entry) {
+        if (!entry || typeof entry.name !== 'string') return false;
+        const name = entry.name.toLowerCase();
+        if (!name.includes('googlevideo.com')) return false;
+        return name.includes('videoplayback')
+            || name.includes('/range/')
+            || name.includes('mime=video')
+            || name.includes('mime=audio');
+    }
+
+    function getTotalYouTubeMediaBytes() {
+        try {
+            return performance.getEntriesByType('resource')
+                .filter(isYouTubeMediaResource)
+                .reduce((total, entry) => total + getResourceTransferBytes(entry), 0);
+        } catch (error) {
+            return 0;
+        }
+    }
+
+    function resetNetworkActivityStateIfNeeded() {
+        const watchPageKey = getWatchPageKey();
+        if (networkActivityState.watchPageKey === watchPageKey) return;
+
+        networkActivityState.watchPageKey = watchPageKey;
+        networkActivityState.lastResourceBytes = null;
+        networkActivityState.lastBufferSeconds = null;
+        networkActivityState.lastCurrentTime = null;
+    }
+
+    function resetNetworkActivityState() {
+        networkActivityState.watchPageKey = '';
+        networkActivityState.lastResourceBytes = null;
+        networkActivityState.lastBufferSeconds = null;
+        networkActivityState.lastCurrentTime = null;
+    }
+
+    function getDerivedNetworkActivityKb(video, speedKbps, bufferSeconds) {
+        resetNetworkActivityStateIfNeeded();
+
+        const totalResourceBytes = getTotalYouTubeMediaBytes();
+        let activityKb = null;
+        if (networkActivityState.lastResourceBytes !== null && totalResourceBytes >= networkActivityState.lastResourceBytes) {
+            const deltaBytes = totalResourceBytes - networkActivityState.lastResourceBytes;
+            if (deltaBytes > 0) activityKb = deltaBytes / CONFIG.sizeBase;
+        }
+        networkActivityState.lastResourceBytes = totalResourceBytes;
+
+        if ((activityKb === null || activityKb <= 0) && video && Number.isFinite(speedKbps) && Number.isFinite(bufferSeconds)) {
+            const currentTime = Number.isFinite(video.currentTime) ? video.currentTime : null;
+            const lastBufferSeconds = networkActivityState.lastBufferSeconds;
+            const lastCurrentTime = networkActivityState.lastCurrentTime;
+
+            if (currentTime !== null && Number.isFinite(lastBufferSeconds) && Number.isFinite(lastCurrentTime)) {
+                const playbackDelta = Math.max(0, currentTime - lastCurrentTime);
+                const downloadedSeconds = Math.max(0, bufferSeconds - lastBufferSeconds + playbackDelta);
+                if (downloadedSeconds > 0) {
+                    activityKb = downloadedSeconds * speedKbps / 8;
+                }
+            }
+        }
+
+        networkActivityState.lastBufferSeconds = Number.isFinite(bufferSeconds) ? bufferSeconds : null;
+        networkActivityState.lastCurrentTime = video && Number.isFinite(video.currentTime) ? video.currentTime : null;
+
+        return Number.isFinite(activityKb) ? activityKb : 0;
+    }
+
+    function getYouTubeMetrics(video) {
+        const statsMetrics = getStatsForNerdsMetrics();
+        const panelMetrics = getNativePanelMetrics();
+        const videoBufferSeconds = getVideoBufferSeconds(video);
+        const speedKbps = statsMetrics.speedKbps ?? panelMetrics.speedKbps ?? null;
+        const bufferSeconds = statsMetrics.bufferSeconds ?? panelMetrics.bufferSeconds ?? videoBufferSeconds;
+
+        return {
+            speedKbps,
+            activityKb: statsMetrics.activityKb
+                ?? panelMetrics.activityKb
+                ?? getDerivedNetworkActivityKb(video, speedKbps, bufferSeconds),
+            bufferSeconds
+        };
     }
 
     function getSpeedTextColor(speedText) {
@@ -719,11 +1006,17 @@
         const body = document.createElement('div');
         body.className = 'ytse-panel';
         body.append(
+            createCustomSection('Basic'),
             createCustomStatRow('连接速度', 'speed'),
+            createCustomStatRow('网络活动', 'activity'),
             createCustomStatRow('缓冲余量', 'buffer'),
             createCustomStatRow('播放进度', 'progress'),
             createCustomStatRow('播放状态', 'state')
         );
+
+        const details = document.createElement('div');
+        details.dataset.ytseCustomDetails = '1';
+        body.appendChild(details);
 
         panel.append(createDragHeader('简约 / 可拖动'), body);
         ensureSummary(panel);
@@ -744,10 +1037,144 @@
         el.classList.toggle('ytse-muted-value', (color || CONFIG.colors.info) === CONFIG.colors.info);
     }
 
+    function createDetailRow(labelText, valueText) {
+        const row = document.createElement('div');
+        const label = document.createElement('span');
+        label.className = 'ytse-label';
+        label.textContent = labelText;
+
+        const value = document.createElement('span');
+        value.className = 'ytse-value ytse-enhanced-value';
+        value.textContent = valueText;
+        value.style.setProperty('--ytse-value-color', CONFIG.colors.info);
+        value.style.color = CONFIG.colors.info;
+
+        row.append(label, value);
+        return row;
+    }
+
+    function stringifyDetailValue(value) {
+        if (value === null || value === undefined || value === '') return '';
+        if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(3).replace(/\.?0+$/, '');
+        if (typeof value === 'boolean') return value ? 'true' : 'false';
+        if (Array.isArray(value)) return value.map(stringifyDetailValue).filter(Boolean).join(', ');
+        if (typeof value === 'object') {
+            try {
+                return JSON.stringify(value);
+            } catch (error) {
+                return String(value);
+            }
+        }
+        return normalizeText(String(value));
+    }
+
+    function getPlayerVideoData() {
+        const player = getYouTubePlayer();
+        if (!player || typeof player.getVideoData !== 'function') return {};
+        try {
+            const data = player.getVideoData();
+            return data && typeof data === 'object' ? data : {};
+        } catch (error) {
+            return {};
+        }
+    }
+
+    function getVideoDetailRows(video) {
+        if (!video) return [];
+        const rows = [
+            ['Current Time', Number.isFinite(video.currentTime) ? `${video.currentTime.toFixed(2)} s` : ''],
+            ['Duration', Number.isFinite(video.duration) ? `${video.duration.toFixed(2)} s` : ''],
+            ['Ready State', video.readyState],
+            ['Network State', video.networkState],
+            ['Playback Rate', video.playbackRate],
+            ['Video Size', video.videoWidth && video.videoHeight ? `${video.videoWidth} x ${video.videoHeight}` : ''],
+            ['Dropped Frames', typeof video.getVideoPlaybackQuality === 'function'
+                ? video.getVideoPlaybackQuality().droppedVideoFrames
+                : ''],
+            ['Total Frames', typeof video.getVideoPlaybackQuality === 'function'
+                ? video.getVideoPlaybackQuality().totalVideoFrames
+                : '']
+        ];
+
+        return rows
+            .map(([label, value]) => [label, stringifyDetailValue(value)])
+            .filter(([, value]) => value);
+    }
+
+    function getStatsDetailRows() {
+        const stats = getYouTubeStatsForNerds();
+        if (!stats) return [];
+
+        const priority = [
+            'viewport',
+            'resolution',
+            'dropped',
+            'frames',
+            'current',
+            'optimal',
+            'volume',
+            'codecs',
+            'codec',
+            'color',
+            'bandwidth',
+            'connection',
+            'network',
+            'buffer',
+            'live',
+            'latency',
+            'format',
+            'itag',
+            'mime'
+        ];
+
+        return flattenStatsObject(stats)
+            .map(({ key, value }) => [key, stringifyDetailValue(value)])
+            .filter(([, value]) => value)
+            .sort(([leftKey], [rightKey]) => {
+                const leftIndex = priority.findIndex((token) => leftKey.includes(token));
+                const rightIndex = priority.findIndex((token) => rightKey.includes(token));
+                const leftRank = leftIndex === -1 ? priority.length : leftIndex;
+                const rightRank = rightIndex === -1 ? priority.length : rightIndex;
+                return leftRank - rightRank || leftKey.localeCompare(rightKey);
+            })
+            .slice(0, 36)
+            .map(([key, value]) => [key.replace(/_/g, ' '), value]);
+    }
+
+    function updateCustomDetails(panel, video) {
+        const details = panel.querySelector('[data-ytse-custom-details="1"]');
+        if (!details) return;
+
+        const playerData = getPlayerVideoData();
+        const playerRows = [
+            ['Video ID', playerData.video_id || playerData.videoId],
+            ['Title', playerData.title],
+            ['Author', playerData.author],
+            ['Is Live', playerData.isLive],
+            ['Is Listed', playerData.isListed]
+        ]
+            .map(([label, value]) => [label, stringifyDetailValue(value)])
+            .filter(([, value]) => value);
+
+        const groups = [
+            ['Player', playerRows],
+            ['Video Element', getVideoDetailRows(video)],
+            ['Stats For Nerds', getStatsDetailRows()]
+        ].filter(([, rows]) => rows.length);
+
+        details.replaceChildren();
+        groups.forEach(([title, rows]) => {
+            details.appendChild(createCustomSection(title));
+            rows.forEach(([label, value]) => {
+                details.appendChild(createDetailRow(label, value));
+            });
+        });
+    }
+
     function updateCustomStatsPanel() {
         if (document.hidden) return;
 
-        if (!isAutoOpenEnabled() || isStatsPanelOpen()) {
+        if (!isWatchPage() || !isAutoOpenEnabled()) {
             removeCustomStatsPanel();
             return;
         }
@@ -757,22 +1184,29 @@
             || document.querySelector('.html5-video-player video')
             || document.querySelector('video');
 
-        const speedText = getApproxConnectionText();
-        setCustomValue(panel, 'speed', speedText, getSpeedTextColor(speedText));
+        const metrics = getYouTubeMetrics(video);
+        const speedText = metrics.speedKbps !== null ? formatSpeed(metrics.speedKbps) : getApproxConnectionText();
+        const speedColor = metrics.speedKbps !== null ? getSpeedMeta(metrics.speedKbps).color : getSpeedTextColor(speedText);
+        const activityText = metrics.activityKb !== null ? formatSize(metrics.activityKb) : '等待 YouTube 数据';
+        const activityColor = metrics.activityKb !== null ? getActivityColor(metrics.activityKb) : CONFIG.colors.info;
+
+        setCustomValue(panel, 'speed', speedText, speedColor);
+        setCustomValue(panel, 'activity', activityText, activityColor);
         setCustomValue(panel, 'state', getPlaybackStateText(video), video && !video.paused ? CONFIG.colors.good : CONFIG.colors.info);
         setCustomValue(panel, 'progress', video && Number.isFinite(video.currentTime)
             ? `${formatTime(video.currentTime)} / ${Number.isFinite(video.duration) ? formatTime(video.duration) : '--:--'}`
             : '--:-- / --:--', CONFIG.colors.info);
+        updateCustomDetails(panel, video);
 
-        const bufferSeconds = getVideoBufferSeconds(video);
+        const bufferSeconds = metrics.bufferSeconds;
         if (bufferSeconds === null) {
             setCustomValue(panel, 'buffer', '等待缓冲数据', CONFIG.colors.warn);
             updateSummaryLines(panel, {
                 speed: speedText,
-                activity: '等待原生统计',
+                activity: activityText,
                 buffer: '等待缓冲数据',
-                speedColor: getSpeedTextColor(speedText),
-                activityColor: CONFIG.colors.info,
+                speedColor,
+                activityColor,
                 bufferColor: CONFIG.colors.warn
             });
         } else {
@@ -780,17 +1214,17 @@
             setCustomValue(panel, 'buffer', `${bufferSeconds.toFixed(2)} s (${meta.label})`, meta.color);
             updateSummaryLines(panel, {
                 speed: speedText,
-                activity: '等待原生统计',
+                activity: activityText,
                 buffer: `${bufferSeconds.toFixed(2)} s (${meta.label})`,
-                speedColor: getSpeedTextColor(speedText),
-                activityColor: CONFIG.colors.info,
+                speedColor,
+                activityColor,
                 bufferColor: meta.color
             });
         }
     }
 
     function startCustomStatsPanel() {
-        if (document.hidden || !isAutoOpenEnabled() || isStatsPanelOpen()) return;
+        if (document.hidden || !isWatchPage() || !isAutoOpenEnabled()) return;
         updateCustomStatsPanel();
         if (!customPanelTimer) {
             customPanelTimer = setInterval(updateCustomStatsPanel, 1000);
@@ -804,6 +1238,33 @@
             clearInterval(customPanelTimer);
             customPanelTimer = null;
         }
+    }
+
+    function setNativeStatsPanelsVisible(visible) {
+        const hosts = Array.from(document.querySelectorAll('.ytse-floating-host, [data-yt-stats-floating-panel="1"]'));
+        hosts.forEach((host) => {
+            if (!(host instanceof HTMLElement) || !host.isConnected || host.id === CUSTOM_PANEL_ID) return;
+
+            if (visible) {
+                if (host.dataset.ytseHiddenOutsideWatch === '1') {
+                    host.style.removeProperty('display');
+                    delete host.dataset.ytseHiddenOutsideWatch;
+                }
+            } else {
+                host.dataset.ytseHiddenOutsideWatch = '1';
+                host.style.setProperty('display', 'none', 'important');
+            }
+        });
+    }
+
+    function cleanupFloatingStatsPanels() {
+        removeCustomStatsPanel();
+        setNativeStatsPanelsVisible(false);
+
+        disconnectPanelObserver();
+        clearAutoOpenTimer();
+        autoOpenAttempts = 0;
+        resetNetworkActivityState();
     }
 
     function getRowValueLeafSpan(row) {
@@ -822,11 +1283,11 @@
         const normalized = normalizeText(text);
         if (!normalized) return null;
 
-        const regex = new RegExp(`([\\d.]+)\\s*${unitPattern}`, 'i');
+        const regex = new RegExp(`([\\d,.]+)\\s*${unitPattern}`, 'i');
         const match = normalized.match(regex);
         if (!match) return null;
 
-        const value = parseFloat(match[1]);
+        const value = parseFloat(match[1].replace(/,/g, ''));
         return Number.isFinite(value) ? value : null;
     }
 
@@ -920,6 +1381,9 @@
         const summary = { speed: '', activity: '', buffer: '', speedColor: CONFIG.colors.good, activityColor: CONFIG.colors.info, bufferColor: CONFIG.colors.info };
 
         rows.forEach((row) => {
+            row.hidden = false;
+            row.style.removeProperty('display');
+            row.style.removeProperty('visibility');
             const labelEl = row.firstElementChild;
             labelEl?.classList.add('ytse-label');
             const label = normalizeText(labelEl ? labelEl.textContent : '');
@@ -1026,7 +1490,12 @@
     }
 
     function bindPanel(panel) {
-        if (currentPanel === panel) return;
+        if (currentPanel === panel) {
+            applyPanelDisplayStyle(panel);
+            setupFloatingDrag(panel);
+            scheduleEnhance();
+            return;
+        }
 
         disconnectPanelObserver();
         if (!panel) return;
@@ -1049,16 +1518,20 @@
     }
 
     function scanPanel() {
+        if (!isWatchPage()) {
+            cleanupFloatingStatsPanels();
+            return;
+        }
+
+        setNativeStatsPanelsVisible(true);
         const panel = document.querySelector(PANEL_SELECTOR);
 
         if (!panel || !panel.isConnected) {
             disconnectPanelObserver();
-            startCustomStatsPanel();
             scheduleAutoOpenStatsPanel();
             return;
         }
 
-        removeCustomStatsPanel();
         clearAutoOpenTimer();
         autoOpenAttempts = 0;
         bindPanel(panel);
@@ -1091,6 +1564,37 @@
         });
     }
 
+    function refreshRouteState() {
+        if (!isWatchPage()) {
+            activeWatchPageKey = '';
+            cleanupFloatingStatsPanels();
+            return;
+        }
+
+        const nextWatchPageKey = getWatchPageKey();
+        if (nextWatchPageKey && nextWatchPageKey !== activeWatchPageKey) {
+            activeWatchPageKey = nextWatchPageKey;
+            autoOpenAttempts = 0;
+            clearAutoOpenTimer();
+        }
+
+        setNativeStatsPanelsVisible(true);
+        schedulePanelScan();
+        scheduleAutoOpenStatsPanel();
+    }
+
+    function scheduleRouteStateRefresh() {
+        routeRefreshSeq += 1;
+        const seq = routeRefreshSeq;
+        const runIfLatest = () => {
+            if (seq === routeRefreshSeq) refreshRouteState();
+        };
+
+        setTimeout(runIfLatest, 0);
+        setTimeout(runIfLatest, 350);
+        setTimeout(runIfLatest, 1200);
+    }
+
     function init() {
         rootObserver = new MutationObserver((mutations) => {
             if (shouldScanPanel(mutations)) {
@@ -1105,11 +1609,15 @@
             });
         }
 
-        window.addEventListener('yt-navigate-finish', schedulePanelScan, true);
-        window.addEventListener('yt-page-data-updated', schedulePanelScan, true);
+        window.addEventListener('yt-navigate-start', scheduleRouteStateRefresh, true);
+        window.addEventListener('yt-navigate-finish', scheduleRouteStateRefresh, true);
+        window.addEventListener('yt-page-data-updated', scheduleRouteStateRefresh, true);
+        window.addEventListener('popstate', scheduleRouteStateRefresh, true);
+        window.addEventListener('hashchange', scheduleRouteStateRefresh, true);
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) {
                 schedulePanelScan();
+                scheduleAutoOpenStatsPanel();
                 scheduleEnhance();
             } else {
                 removeCustomStatsPanel();
@@ -1117,9 +1625,7 @@
         });
 
         registerMenuCommands();
-        schedulePanelScan();
-        startCustomStatsPanel();
-        scheduleAutoOpenStatsPanel();
+        scheduleRouteStateRefresh();
     }
 
     init();
