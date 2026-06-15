@@ -46,7 +46,7 @@ QB_PASSWORD_FILE = os.getenv(
     "QB_PASSWORD_FILE",
     os.path.join(os.path.dirname(__file__), ".qb_password"),
 )
-QB_PASSWORD_FALLBACK = "Xmt@321"
+QB_PASSWORD_FALLBACK = "password"
 
 CATEGORY = os.getenv("QB_CATEGORY", "TJU")
 POLL_INTERVAL = float(os.getenv("QB_POLL_INTERVAL", "3"))       # 常驻模式间隔
