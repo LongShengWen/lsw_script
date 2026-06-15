@@ -5,6 +5,7 @@
 监听 qBittorrent 中分类为 TJU 的种子：
 
 - 下载进度 <= 8%：不处理
+- 添加超过 12 小时且下载进度仍为 0%：删种删文件
 - 体积 >= 20GiB：不再做 8%-10% 预删，直接下载到完成
 - 若 tracker 明确返回“种子已被站点删除/未注册”等错误：直接视为免考并删种删文件
 - 下载完成后：按北洋园 PT 的 H&R 规则计算所需做种时长，达标后删种并删除文件
@@ -58,6 +59,7 @@ SITE_COOKIE_FILE = os.getenv(
 )
 SITE_REQUEST_TIMEOUT = float(os.getenv("QB_SITE_REQUEST_TIMEOUT", "15"))
 HR_BUFFER_SECONDS = int(os.getenv("QB_HR_BUFFER_SECONDS", "1800"))
+ZERO_PROGRESS_DELETE_AFTER_SECONDS = int(os.getenv("QB_ZERO_PROGRESS_DELETE_AFTER_SECONDS", str(12 * 3600)))
 SITE_DELETED_KEYWORDS = tuple(
     s.strip().lower()
     for s in os.getenv(
@@ -448,6 +450,23 @@ def should_delete_hr_torrent(
     return seeding_time >= get_hr_required_seed_time(size_bytes, ratio)
 
 
+def should_delete_zero_progress_torrent(
+    progress: float,
+    added_on: int,
+    now_ts: int | None = None,
+) -> bool:
+    if ZERO_PROGRESS_DELETE_AFTER_SECONDS <= 0:
+        return False
+    if added_on <= 0:
+        return False
+    if progress > 0.0:
+        return False
+
+    if now_ts is None:
+        now_ts = int(time.time())
+    return now_ts - added_on >= ZERO_PROGRESS_DELETE_AFTER_SECONDS
+
+
 def log_delete(
     reason: str,
     torrent_hash: str,
@@ -484,9 +503,28 @@ def run_once() -> tuple[int, int]:
         ratio = normalize_float(t.get("ratio"), 0.0)
         state = t.get("state", "")
         seeding_time = normalize_int(t.get("seeding_time"), 0)
+        added_on = normalize_int(t.get("added_on"), 0)
         size_bytes = get_torrent_size(t)
 
         if not torrent_hash:
+            continue
+
+        if should_delete_zero_progress_torrent(progress, added_on):
+            matched_count += 1
+            age_seconds = max(0, int(time.time()) - added_on)
+            log_delete(
+                "超过12小时进度为0",
+                torrent_hash,
+                name,
+                state,
+                size_bytes,
+                progress,
+                (
+                    f"added_on={added_on}, age_seconds={age_seconds}, "
+                    f"threshold_seconds={ZERO_PROGRESS_DELETE_AFTER_SECONDS}"
+                ),
+            )
+            deleted_count += 1
             continue
 
         trackers = get_torrent_trackers(torrent_hash)
